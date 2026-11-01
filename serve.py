@@ -1,4 +1,6 @@
 """
+Written by claude code, for local testing purposes
+
 Serve this folder locally and open one of the pages in the browser.
 Usage: python serve.py [page] [--port PORT]
   e.g. python serve.py              (opens evolve.html)

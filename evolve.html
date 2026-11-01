@@ -11,6 +11,15 @@
   input[type=number] { width: 4em; }
   #scrub { width: 420px; }
   #genList { min-width: 360px; }
+  #custom { display: inline-block; border: 1px solid #333; padding: 4px 12px; margin: 8px; max-width: 900px; }
+  #custom h2 { font-size: 1.1em; margin: 6px; }
+  .nnBoxes { display: flex; gap: 12px; }
+  .nnBoxes > div { flex: 1; }
+  .nnBoxes textarea { width: 100%; box-sizing: border-box; height: 130px; font-family: monospace; font-size: 11px;
+                      background: #1a1a1a; color: #ddd; border: 1px solid #444; }
+  #matchResult { white-space: pre-line; }
+  #matchResult.error, #error { color: #f66; }
+  #error { white-space: pre-wrap; }
 </style>
 <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
 </head>
@@ -22,10 +31,33 @@
   <button id="newPop" disabled>New population</button>
 </div>
 <div class="controls">
-  <label>Generations <input id="genCount" type="number" min="1" max="100" value="10"></label>
+  <label>Generations <input id="genCount" type="number" min="1" max="1000" value="10"></label>
   <button id="runGens" disabled>Run generation_increment</button>
   <button id="stop" disabled>Stop</button>
 </div>
+
+<div id="custom">
+  <h2>Test your own networks</h2>
+  <div class="nnBoxes">
+    <div>
+      <label for="nnA" style="color:#4af">Network A</label>
+      <textarea id="nnA" spellcheck="false" placeholder="Paste a network as printed by opponentNN, e.g. {'l1weights': array([[...]]), 'l1biases': array([...]), ...}"></textarea>
+      <button id="fillA" disabled>Copy population[0]</button>
+    </div>
+    <div>
+      <label for="nnB" style="color:#f64">Network B</label>
+      <textarea id="nnB" spellcheck="false" placeholder="If you paste several networks (e.g. all of output.txt), the last one is used."></textarea>
+      <button id="fillB" disabled>Copy population[1]</button>
+    </div>
+  </div>
+  <div class="controls">
+    <label>Games <input id="matchGames" type="number" min="1" max="1000" value="20"></label>
+    <label>Seed <input id="matchSeed" type="number" value="0"></label>
+    <button id="runMatch" disabled>Play A vs B</button>
+  </div>
+  <p id="matchResult">Games alternate sides so neither network always plays bottom. A sample game (A bottom, B top) is added to the list below for replay.</p>
+</div>
+
 <div class="controls">
   <label>Sample game from
     <select id="genList" disabled></select>
@@ -45,15 +77,16 @@
   </label>
   <input id="scrub" type="range" min="0" max="0" value="0" disabled>
 </div>
+<p id="error"></p>
 <p id="status">Loading Python...</p>
 <canvas id="board"></canvas>
-<p><span style="color:#4af">population[0] (bottom)</span> vs <span style="color:#f64">population[1] (top)</span></p>
+<p id="matchup"></p>
 
 <script>
 // Runs opponentNN.generation_increment() in the browser via Pyodide. After each
-// generation, population[0] and population[1] play one recorded sample game that
-// can be replayed below. Serve this folder over HTTP (python serve.py) and open
-// http://localhost:8000/evolve.html
+// generation, the longest game of its tournament is replayed with recording on so it
+// can be watched below. Networks can also be pasted in and played against each other.
+// Serve this folder over HTTP (python serve.py) and open http://127.0.0.1:8000/evolve.html
 const SCALE = 0.6;
 const STEP_MS = 1000 / 60;
 
@@ -64,10 +97,13 @@ const statusEl = $("status");
 const genList = $("genList");
 const scrub = $("scrub");
 const playPauseBtn = $("playPause");
+const matchResultEl = $("matchResult");
 
-// Wraps pong.frame_step (to record sample games) and opponentNN.playgame (to
-// measure tournament match lengths) without changing either file.
-const GLUE = `
+// Wraps pong.frame_step (to record sample games and see how each game ended) and
+// opponentNN.playgame (to measure tournament match lengths) without changing either file.
+const GLUE = String.raw`
+import ast
+import re
 import sys
 sys.path.insert(0, "/home/pyodide")
 import numpy as np
@@ -76,10 +112,12 @@ import opponentNN
 
 _frame_step = pong.frame_step
 _playgame = opponentNN.playgame
+_playtracker = getattr(opponentNN, "playballtracker", None)
 _recording = None   # list of frames while a sample game is being recorded
 _meta = {}
 _frames_run = 0
-_matches_run = 0
+_bottom_returns = 0  # times the bottom paddle has returned the ball
+_last_state = None   # state of the most recent frame, to tell who won
 
 def _snap(g):
     return [float(g["ballx"]), float(g["bally"]),
@@ -87,82 +125,253 @@ def _snap(g):
             str(g["playeraction"]), str(g["opponentaction"]), str(g["state"])]
 
 def _wrapped_frame_step(game):
-    global _frames_run
+    global _frames_run, _last_state, _bottom_returns
     _frames_run += 1
     if _recording is not None and not _recording:
         _meta.update(width=game["width"], height=game["height"], radius=game["radius"])
         _recording.append(_snap(game))
+    moving_down = np.sin(game["ballangle"]) > 0
     _frame_step(game)
+    # Wall bounces keep the vertical direction, so down -> up only happens on a bottom-paddle hit.
+    if moving_down and np.sin(game["ballangle"]) < 0:
+        _bottom_returns += 1
+    _last_state = game["state"]
     if _recording is not None:
         _recording.append(_snap(game))
 
-def _counting_playgame(*args, **kwargs):
-    global _matches_run
-    _matches_run += 1
-    return _playgame(*args, **kwargs)
+# Per-generation statistics, gathered while generation_increment runs
+_stats = {}
+_longest = {}   # "nn" / "tracker" -> (frames, args, kwargs) of the longest game of that kind
 
+def _reset_gen_stats():
+    _stats.clear()
+    _stats.update(matches=0, match_frames=0, tracker_games=0, tracker_frames=0,
+                  tracker_returns=0, best_tracker_returns=0)
+    _longest.clear()
+
+def _note_longest(kind, frames, args, kwargs):
+    if kind not in _longest or frames > _longest[kind][0]:
+        _longest[kind] = (frames, args, kwargs)
+
+def _counting_playgame(*args, **kwargs):
+    start = _frames_run
+    result = _playgame(*args, **kwargs)
+    frames = _frames_run - start
+    _stats["matches"] += 1
+    _stats["match_frames"] += frames
+    _note_longest("nn", frames, args, kwargs)
+    return result
+
+def _counting_tracker(*args, **kwargs):
+    start, start_returns = _frames_run, _bottom_returns
+    result = _playtracker(*args, **kwargs)
+    frames, returns = _frames_run - start, _bottom_returns - start_returns
+    _stats["tracker_games"] += 1
+    _stats["tracker_frames"] += frames
+    _stats["tracker_returns"] += returns
+    _stats["best_tracker_returns"] = max(_stats["best_tracker_returns"], returns)
+    _note_longest("tracker", frames, args, kwargs)
+    return result
+
+_reset_gen_stats()
 pong.frame_step = _wrapped_frame_step
 opponentNN.playgame = _counting_playgame
+if _playtracker is not None:
+    opponentNN.playballtracker = _counting_tracker
+
+def _record(fn, *args, **kwargs):
+    global _recording
+    _recording = []
+    start_returns = _bottom_returns
+    try:
+        result = fn(*args, **kwargs)
+        frames = _recording
+    finally:
+        _recording = None
+    return result, [_meta["width"], _meta["height"], _meta["radius"]], frames, _bottom_returns - start_returns
+
+def _entry(kind, fn, args, kwargs, players, expected_length=None):
+    # Replays a game with recording on and packages it for the page.
+    result, meta, frames, returns = _record(fn, *args, **kwargs)
+    return {"gen": gen, "kind": kind, "result": [float(x) for x in np.atleast_1d(result)],
+            "meta": meta, "frames": frames, "players": players, "bottom_returns": returns,
+            # False only if the game isn't deterministic, so the replay differs from the original
+            "exact": expected_length is None or len(frames) - 1 == expected_length}
+
+# --- Evolution ---
 
 pop = None
 rng = None
 gen = 0
+scores = None   # scores returned by the last generation_increment, passed back in as lastscores
 
-def _sample(avg_frames):
-    global _recording
-    _recording = []
-    try:
-        result = _playgame(pop[0], pop[1], rng.integers(low=0, high=10000))
-        frames = _recording
-    finally:
-        _recording = None
-    meta = [_meta["width"], _meta["height"], _meta["radius"]]
-    return [gen, list(result), avg_frames, meta, frames]
+def _index(population, nn):
+    return next((k for k, n in enumerate(population) if n is nn), None)
+
+def _arg(args, kwargs, pos, name):
+    return args[pos] if len(args) > pos else kwargs.get(name)
 
 def reset(size, seed):
-    global pop, rng, gen
+    # Gen 0 has no tournament yet, so show population[0] vs population[1].
+    global pop, rng, gen, scores
     rng = np.random.default_rng(seed)
     pop = opponentNN.generate(size, rng.integers(low=0, high=10000))
     gen = 0
-    return _sample(None)
+    scores = np.zeros(size)
+    return [_entry("sample", _playgame, (pop[0], pop[1], rng.integers(low=0, high=10000)), {}, [0, 1])]
 
 def step():
-    global pop, gen, _frames_run, _matches_run
-    _frames_run = 0
-    _matches_run = 0
-    pop = opponentNN.generation_increment(pop, rng.integers(low=0, high=10000))
+    # Runs one generation, then replays the longest network-vs-network game and the longest
+    # game against the ball tracker with recording on.
+    global pop, gen, scores
+    _reset_gen_stats()
+    played = pop
+    pop, scores = opponentNN.generation_increment(pop, scores, rng.integers(low=0, high=10000))
     gen += 1
-    return _sample(_frames_run / max(_matches_run, 1))
+    s = dict(_stats)
+    stats = {
+        "avg_match_frames": s["match_frames"] / s["matches"] if s["matches"] else None,
+        "tracker_games": s["tracker_games"],
+        "avg_tracker_frames": s["tracker_frames"] / s["tracker_games"] if s["tracker_games"] else None,
+        "avg_tracker_returns": s["tracker_returns"] / s["tracker_games"] if s["tracker_games"] else None,
+        "best_tracker_returns": s["best_tracker_returns"],
+    }
+    entries = []
+    if "nn" in _longest:
+        length, args, kwargs = _longest["nn"]
+        players = [_index(played, _arg(args, kwargs, 0, "nn1")), _index(played, _arg(args, kwargs, 1, "nn2"))]
+        entries.append(_entry("nn", _playgame, args, kwargs, players, length))
+    if "tracker" in _longest:
+        length, args, kwargs = _longest["tracker"]
+        entries.append(_entry("tracker", _playtracker, args, kwargs, [_index(played, _arg(args, kwargs, 0, "nn"))], length))
+    for e in entries:
+        e["stats"] = stats
+    return entries
+
+def population_network(i):
+    return str(pop[i])
+
+# --- Pasted networks ---
+
+_custom = {}
+
+def _num_layers(nn):
+    return len([k for k in nn if re.fullmatch(r"l\d+weights", k)])
+
+def _parse_network(text, name):
+    # Accepts str(network) as printed by opponentNN; with several, the last one wins.
+    blocks = re.findall(r"\{[^{}]*\}", text)
+    if not blocks:
+        raise ValueError(f"Network {name}: no network found. Paste one as printed by opponentNN, "
+                         "e.g. {'l1weights': array([[...]]), 'l1biases': array([...]), ...}")
+    src = re.sub(r",\s*dtype=\w+", "", blocks[-1]).replace("array(", "(")
+    try:
+        d = ast.literal_eval(src)
+    except (ValueError, SyntaxError) as e:
+        raise ValueError(f"Network {name}: couldn't read it ({e}).")
+    # Must have the same number of layers as the networks opponentNN currently builds,
+    # since that's what forward_pass uses.
+    layers = _num_layers(pop[0])
+    keys = [f"l{i}{part}" for i in range(1, layers + 1) for part in ("weights", "biases")]
+    if not isinstance(d, dict):
+        raise ValueError(f"Network {name}: expected a dict with keys {', '.join(keys)}.")
+    if _num_layers(d) != layers:
+        raise ValueError(f"Network {name}: has {_num_layers(d)} layers, but opponentNN's networks "
+                         f"have {layers} ({', '.join(keys)}).")
+    missing = [k for k in keys if k not in d]
+    if missing:
+        raise ValueError(f"Network {name}: missing {', '.join(missing)}.")
+    nn = {k: np.array(d[k], dtype=float) for k in keys}
+    # Each layer's input size must match the previous layer's output size, starting from
+    # the input count opponentNN currently uses and ending at 3 outputs.
+    num_inputs = pop[0]["l1weights"].shape[0]
+    size_in = num_inputs
+    for i in range(1, layers + 1):
+        w, b = nn[f"l{i}weights"], nn[f"l{i}biases"]
+        size_out = 3 if i == layers else (w.shape[1] if w.ndim == 2 else 0)
+        for k, arr, shape in ((f"l{i}weights", w, (size_in, size_out)), (f"l{i}biases", b, (size_out,))):
+            if size_out == 0 or arr.shape != shape:
+                raise ValueError(f"Network {name}: {k} has shape {arr.shape}, expected {shape} "
+                                 f"({num_inputs} inputs, any hidden sizes, 3 outputs).")
+        size_in = size_out
+    return nn
+
+def set_custom(text_a, text_b, seed):
+    try:
+        a = _parse_network(text_a, "A")
+        b = _parse_network(text_b, "B")
+    except ValueError as e:
+        return str(e)
+    _custom.update(a=a, b=b, rng=np.random.default_rng(seed))
+    return ""
+
+def custom_game(i):
+    # Alternate sides so neither network always plays bottom.
+    a_bottom = i % 2 == 0
+    nn1, nn2 = (_custom["a"], _custom["b"]) if a_bottom else (_custom["b"], _custom["a"])
+    start = _frames_run
+    _playgame(nn1, nn2, _custom["rng"].integers(low=0, high=10000))
+    frames = _frames_run - start
+    if _last_state not in ("won", "lost"):
+        return ["draw", frames]
+    bottom_won = _last_state == "won"
+    return ["A" if bottom_won == a_bottom else "B", frames]
+
+def custom_sample():
+    return [_entry("custom", _playgame, (_custom["a"], _custom["b"], _custom["rng"].integers(low=0, high=10000)), {}, None)]
 `;
 
 let py = null;
-let history = [];   // one entry per generation: { gen, result, avgFrames, width, height, radius, frames }
+// One entry per recorded game: { gen, kind, result, frames, players, bottom_returns, exact, stats?,
+// width, height, radius, label? }. kind is "sample", "nn", "tracker" or "custom".
+let history = [];
 let match = null;   // the entry currently being replayed
 let pos = 0;
 let playing = true;
 let busy = false;
+let customCount = 0;
 
+// Python returns a list of entry dicts; convert them to plain JS objects.
 function callPy(fn, ...args) {
   const proxy = fn(...args);
-  const [gen, result, avgFrames, [width, height, radius], frames] = proxy.toJs();
+  const entries = proxy.toJs({ dict_converter: Object.fromEntries });
   proxy.destroy();
-  return { gen, result, avgFrames, width, height, radius, frames };
+  return entries.map(e => ({ ...e, width: e.meta[0], height: e.meta[1], radius: e.meta[2] }));
 }
 
-// Read the winner from the final game state so this doesn't depend on playgame's scoring.
+const fmt = (x, digits = 0) => (x == null ? "n/a" : x.toFixed(digits));
+const popName = i => (i == null ? "a network" : `population[${i}]`);
+
+// Read the winner from the final game state so this doesn't depend on the scoring.
 function outcome(entry) {
   const state = entry.frames[entry.frames.length - 1][6];
-  if (state === "won") return "bottom wins";
-  if (state === "lost") return "top wins";
+  const [bottom, top] = entry.kind === "tracker" ? ["network", "tracker"] : ["bottom", "top"];
+  if (state === "won") return `${bottom} wins`;
+  if (state === "lost") return `${top} wins`;
   return "draw (frame limit)";
+}
+
+function entryName(entry) {
+  if (entry.label != null) return entry.label;
+  if (entry.kind === "nn") return `Gen ${entry.gen} longest NN vs NN`;
+  if (entry.kind === "tracker") return `Gen ${entry.gen} longest vs tracker`;
+  return `Gen ${entry.gen}`;
 }
 
 function addToHistory(entry) {
   history.push(entry);
   const opt = document.createElement("option");
   opt.value = history.length - 1;
-  opt.textContent = `Gen ${entry.gen}: ${outcome(entry)} in ${entry.frames.length - 1} frames` +
-    (entry.avgFrames == null ? " (initial population)" : ` | tournament avg ${entry.avgFrames.toFixed(0)} frames/match`);
+  let text = `${entryName(entry)}: ${outcome(entry)} in ${entry.frames.length - 1} frames`;
+  const s = entry.stats;
+  if (entry.kind === "sample") text += " (initial population sample)";
+  if (entry.kind === "nn") text += ` | tournament avg ${fmt(s.avg_match_frames)} frames/match`;
+  if (entry.kind === "tracker") {
+    text += ` (${entry.bottom_returns} returns) | vs tracker: avg ${fmt(s.avg_tracker_returns, 1)} returns/game,` +
+            ` best ${s.best_tracker_returns}, avg ${fmt(s.avg_tracker_frames)} frames`;
+  }
+  if (!entry.exact) text += " | replay differs from original game";
+  opt.textContent = text;
   genList.appendChild(opt);
 }
 
@@ -172,6 +381,16 @@ function show(index) {
   canvas.width = match.width * SCALE;
   canvas.height = match.height * SCALE;
   scrub.max = match.frames.length - 1;
+  let bottom = "Network A", top = "Network B", note = "";
+  if (match.kind === "sample" || match.kind === "nn") {
+    [bottom, top] = match.players.map(popName);
+    if (match.kind === "nn") note = ` (longest network game of generation ${match.gen}'s tournament, played by the population before it)`;
+  } else if (match.kind === "tracker") {
+    bottom = popName(match.players[0]);
+    top = "ball tracker";
+    note = ` (longest game against the ball tracker in generation ${match.gen}, played by the population before it)`;
+  }
+  $("matchup").innerHTML = `<span style="color:#4af">${bottom} (bottom)</span> vs <span style="color:#f64">${top} (top)</span>${note}`;
   pos = 0;
   setPlaying(true);
 }
@@ -203,7 +422,7 @@ function draw() {
 
   scrub.value = frame;
   if (!busy) {
-    let text = `Gen ${match.gen} | frame ${frame}/${frames.length - 1} | bottom: ${pact} | top: ${oact} | state: ${state}`;
+    let text = `${entryName(match)} | frame ${frame}/${frames.length - 1} | bottom: ${pact} | top: ${oact} | state: ${state}`;
     if (frame === frames.length - 1) text += ` | ${outcome(match)} | points (${match.result.join(", ")})`;
     statusEl.textContent = text;
   }
@@ -216,7 +435,9 @@ function setPlaying(p) {
 
 function setBusy(b) {
   busy = b;
-  for (const id of ["newPop", "runGens", "genList", "playPause", "restart", "scrub"]) $(id).disabled = b;
+  for (const id of ["newPop", "runGens", "runMatch", "fillA", "fillB", "genList", "playPause", "restart", "scrub"]) {
+    $(id).disabled = b;
+  }
 }
 
 const repaint = () => new Promise(r => setTimeout(r, 30)); // let the page update before blocking on Python
@@ -226,9 +447,10 @@ async function newPopulation() {
   statusEl.textContent = "Creating population...";
   await repaint();
   history = [];
+  customCount = 0;
   genList.innerHTML = "";
   const size = Math.max(2, Number($("popSize").value) | 0);
-  addToHistory(callPy(py.reset, size, Number($("seed").value) | 0));
+  callPy(py.reset, size, Number($("seed").value) | 0).forEach(addToHistory);
   setBusy(false);
   show(0);
 }
@@ -242,21 +464,83 @@ async function runGenerations() {
   setBusy(true);
   $("stop").disabled = false;
   for (let i = 1; i <= count && !stopRequested; i++) {
-    statusEl.textContent = `Running generation ${history.length} (${i}/${count})...`;
+    const nextGen = Math.max(0, ...history.filter(e => e.label == null).map(e => e.gen)) + 1;
+    statusEl.textContent = `Running generation ${nextGen} (${i}/${count})...`;
     await repaint();
-    addToHistory(callPy(py.step));
+    callPy(py.step).forEach(addToHistory);
   }
   $("stop").disabled = true;
   setBusy(false);
   show(history.length - 1);
 }
 
-$("newPop").onclick = newPopulation;
-$("runGens").onclick = runGenerations;
+async function runCustomMatch() {
+  const n = Math.min(1000, Math.max(1, Number($("matchGames").value) | 0));
+  $("matchGames").value = n;
+  const error = py.set_custom($("nnA").value, $("nnB").value, Number($("matchSeed").value) | 0);
+  matchResultEl.classList.toggle("error", !!error);
+  if (error) {
+    matchResultEl.textContent = error;
+    return;
+  }
+  stopRequested = false;
+  setBusy(true);
+  $("stop").disabled = false;
+  const tally = { A: 0, B: 0, draw: 0 };
+  let totalFrames = 0;
+  let played = 0;
+  for (let i = 0; i < n && !stopRequested; i++) {
+    if (i % 5 === 0) {
+      statusEl.textContent = `Playing A vs B: game ${i + 1}/${n}...`;
+      await repaint();
+    }
+    const proxy = py.custom_game(i);
+    const [winner, frames] = proxy.toJs();
+    proxy.destroy();
+    tally[winner]++;
+    totalFrames += frames;
+    played++;
+  }
+  const pct = k => played ? ` (${(100 * tally[k] / played).toFixed(0)}%)` : "";
+  matchResultEl.textContent =
+    `${played} games: A won ${tally.A}${pct("A")}, B won ${tally.B}${pct("B")}, draws ${tally.draw}${pct("draw")}\n` +
+    `Average game length: ${played ? (totalFrames / played).toFixed(0) : 0} frames`;
+
+  statusEl.textContent = "Recording sample game...";
+  await repaint();
+  const [entry] = callPy(py.custom_sample);
+  entry.label = `Custom #${++customCount}: A vs B`;
+  addToHistory(entry);
+  $("stop").disabled = true;
+  setBusy(false);
+  show(history.length - 1);
+}
+
+// Show Python errors on the page instead of leaving it stuck in its busy state.
+function guarded(fn) {
+  return async () => {
+    $("error").textContent = "";
+    try {
+      await fn();
+    } catch (err) {
+      console.error(err);
+      $("stop").disabled = true;
+      setBusy(false);
+      const lines = String(err.message ?? err).trim().split("\n");
+      $("error").textContent = `Error: ${lines[lines.length - 1]}\n(full traceback in the browser console)`;
+    }
+  };
+}
+
+$("newPop").onclick = guarded(newPopulation);
+$("runGens").onclick = guarded(runGenerations);
+$("runMatch").onclick = guarded(runCustomMatch);
+$("fillA").onclick = () => { $("nnA").value = py.population_network(0); };
+$("fillB").onclick = () => { $("nnB").value = py.population_network(1); };
 $("stop").onclick = () => {
   stopRequested = true;
   $("stop").disabled = true;
-  statusEl.textContent = "Stopping after this generation...";
+  statusEl.textContent = "Stopping...";
 };
 genList.onchange = () => show(Number(genList.value));
 playPauseBtn.onclick = () => {
@@ -275,7 +559,10 @@ async function main() {
     pyodide.FS.writeFile("/home/pyodide/" + name, src);
   }
   pyodide.runPython(GLUE);
-  py = { reset: pyodide.globals.get("reset"), step: pyodide.globals.get("step") };
+  py = {};
+  for (const name of ["reset", "step", "population_network", "set_custom", "custom_game", "custom_sample"]) {
+    py[name] = pyodide.globals.get(name);
+  }
 
   await newPopulation();
 
