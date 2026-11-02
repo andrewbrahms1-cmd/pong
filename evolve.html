@@ -64,6 +64,13 @@
   </label>
 </div>
 <div class="controls">
+  <span id="topInfo">Top performer: run a generation first</span>
+  <button id="topDownload" disabled>Download</button>
+  <button id="topCopy" disabled>Copy</button>
+  <button id="topToA" disabled>Use as A</button>
+  <button id="topToB" disabled>Use as B</button>
+</div>
+<div class="controls">
   <button id="playPause" disabled>Pause</button>
   <button id="restart" disabled>Restart</button>
   <label>Speed
@@ -204,6 +211,7 @@ pop = None
 rng = None
 gen = 0
 scores = None   # scores returned by the last generation_increment, passed back in as lastscores
+_top = {}       # generation -> (network, score, index in the returned population)
 
 def _index(population, nn):
     return next((k for k, n in enumerate(population) if n is nn), None)
@@ -218,6 +226,7 @@ def reset(size, seed):
     pop = opponentNN.generate(size, rng.integers(low=0, high=10000))
     gen = 0
     scores = np.zeros(size)
+    _top.clear()
     return [_entry("sample", _playgame, (pop[0], pop[1], rng.integers(low=0, high=10000)), {}, [0, 1])]
 
 def step():
@@ -228,6 +237,9 @@ def step():
     played = pop
     pop, scores = opponentNN.generation_increment(pop, scores, rng.integers(low=0, high=10000))
     gen += 1
+    # Top performer = the network generation_increment scored highest (it returns the elites' scores).
+    best = int(np.argmax(scores))
+    _top[gen] = (pop[best], float(scores[best]), best)
     s = dict(_stats)
     stats = {
         "avg_match_frames": s["match_frames"] / s["matches"] if s["matches"] else None,
@@ -250,6 +262,16 @@ def step():
 
 def population_network(i):
     return str(pop[i])
+
+def top_network(g):
+    # [text, score, index] for generation g's top performer, or None. Printed at full
+    # precision in the same format opponentNN prints, so it can be pasted back in exactly.
+    if g not in _top:
+        return None
+    nn, score, idx = _top[g]
+    with np.printoptions(precision=17, floatmode="unique", threshold=sys.maxsize):
+        text = str(nn)
+    return [text, score, idx]
 
 # --- Pasted networks ---
 
@@ -393,7 +415,61 @@ function show(index) {
   $("matchup").innerHTML = `<span style="color:#4af">${bottom} (bottom)</span> vs <span style="color:#f64">${top} (top)</span>${note}`;
   pos = 0;
   setPlaying(true);
+  updateTopControls();
 }
+
+// --- Exporting a generation's top performer ---
+
+// Generation whose top performer the export buttons act on (the one being viewed), or null.
+function topGen() {
+  return match && match.label == null && match.gen > 0 ? match.gen : null;
+}
+
+function updateTopControls() {
+  const g = topGen();
+  for (const id of ["topDownload", "topCopy", "topToA", "topToB"]) $(id).disabled = busy || g == null;
+  $("topInfo").textContent = g == null
+    ? "Top performer: select a generation (1 or later) to export its best network"
+    : `Top performer of Gen ${g}:`;
+}
+
+function fetchTop() {
+  const proxy = py.top_network(topGen());
+  if (proxy == null) return null;
+  const [text, score, index] = proxy.toJs();
+  proxy.destroy();
+  return { text, score, index, gen: topGen() };
+}
+
+function downloadText(text, filename) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function topDone(top, what) {
+  $("topInfo").textContent = `Top performer of Gen ${top.gen} (population[${top.index}] after that generation, ` +
+    `score ${top.score.toFixed(0)}): ${what}`;
+}
+
+$("topDownload").onclick = () => {
+  const top = fetchTop();
+  downloadText(top.text + "\n", `pong_gen${top.gen}_top.txt`);
+  topDone(top, "downloaded");
+};
+$("topCopy").onclick = async () => {
+  const top = fetchTop();
+  try {
+    await navigator.clipboard.writeText(top.text);
+    topDone(top, "copied to clipboard");
+  } catch {
+    topDone(top, "couldn't copy (clipboard blocked) - use Download instead");
+  }
+};
+$("topToA").onclick = () => { const top = fetchTop(); $("nnA").value = top.text; topDone(top, "put in Network A"); };
+$("topToB").onclick = () => { const top = fetchTop(); $("nnB").value = top.text; topDone(top, "put in Network B"); };
 
 function draw() {
   if (!match) return;
@@ -438,6 +514,7 @@ function setBusy(b) {
   for (const id of ["newPop", "runGens", "runMatch", "fillA", "fillB", "genList", "playPause", "restart", "scrub"]) {
     $(id).disabled = b;
   }
+  updateTopControls();
 }
 
 const repaint = () => new Promise(r => setTimeout(r, 30)); // let the page update before blocking on Python
@@ -560,7 +637,7 @@ async function main() {
   }
   pyodide.runPython(GLUE);
   py = {};
-  for (const name of ["reset", "step", "population_network", "set_custom", "custom_game", "custom_sample"]) {
+  for (const name of ["reset", "step", "population_network", "top_network", "set_custom", "custom_game", "custom_sample"]) {
     py[name] = pyodide.globals.get(name);
   }
 

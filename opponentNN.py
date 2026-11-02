@@ -1,6 +1,6 @@
 import pong
 import numpy as np
-from scipy.special import softmax
+
 import copy
 
 def relu(x):
@@ -126,33 +126,44 @@ def generate(num, seed):
 
     return output
 
-def mutate(nn, rate, seed):
+def mutate(nn, rate, seed, scalefactor=0.3):
     newnn = copy.deepcopy(nn)
     rng = np.random.default_rng(seed)
     for row in range(len(nn["l1weights"])):
         for val in range(len(nn["l1weights"][row])):
             if rng.uniform(0, 1) <= rate:
-                newnn["l1weights"][row][val] += rng.normal(loc=0, scale=0.3, size=None)
+                newnn["l1weights"][row][val] += rng.normal(loc=0, scale=scalefactor, size=None)
+            newnn["l1weights"][row][val] = max(newnn["l1weights"][row][val], -5)
+            newnn["l1weights"][row][val] = min(newnn["l1weights"][row][val], 5)
     for val in range(len(nn["l1biases"])):
         if rng.uniform(0, 1) <= rate:
-            newnn["l1biases"][val] += rng.normal(loc=0, scale=0.3, size=None)
-            
-
+            newnn["l1biases"][val] += rng.normal(loc=0, scale=scalefactor, size=None)
+        newnn["l1biases"][val] = max(newnn["l1biases"][val], -5)
+        newnn["l1biases"][val] = min(newnn["l1biases"][val], 5)
     for row in range(len(nn["l2weights"])):
         for val in range(len(nn["l2weights"][row])):
             if rng.uniform(0, 1) <= rate:
-                newnn["l2weights"][row][val] += rng.normal(loc=0, scale=0.3, size=None)
+                newnn["l2weights"][row][val] += rng.normal(loc=0, scale=scalefactor, size=None)
+            newnn["l2weights"][row][val] = max(newnn["l2weights"][row][val], -5)
+            newnn["l2weights"][row][val] = min(newnn["l2weights"][row][val], 5)
+    
     for val in range(len(nn["l2biases"])):
         if rng.uniform(0, 1) <= rate:
-            newnn["l2biases"][val] += rng.normal(loc=0, scale=0.3, size=None)
-
+            newnn["l2biases"][val] += rng.normal(loc=0, scale=scalefactor, size=None)
+        newnn["l2biases"][val] = max(newnn["l2biases"][val], -5)
+        newnn["l2biases"][val] = min(newnn["l2biases"][val], 5)
     for row in range(len(nn["l3weights"])):
         for val in range(len(nn["l3weights"][row])):
             if rng.uniform(0, 1) <= rate:
-                newnn["l3weights"][row][val] += rng.normal(loc=0, scale=0.1, size=None)
+                newnn["l3weights"][row][val] += rng.normal(loc=0, scale=scalefactor, size=None)
+            newnn["l3weights"][row][val] = max(newnn["l3weights"][row][val], -5)
+            newnn["l3weights"][row][val] = min(newnn["l3weights"][row][val], 5)
+    
     for val in range(len(nn["l3biases"])):
         if rng.uniform(0, 1) <= rate:
-            newnn["l3biases"][val] += rng.normal(loc=0, scale=0.1, size=None)
+            newnn["l3biases"][val] += rng.normal(loc=0, scale=scalefactor, size=None)
+        newnn["l3biases"][val] = max(newnn["l3biases"][val], -5)
+        newnn["l3biases"][val] = min(newnn["l3biases"][val], 5) 
     return newnn
 
 def generation_increment(nns, lastscores, seed):
@@ -188,7 +199,7 @@ def generation_increment(nns, lastscores, seed):
     
 
     for _ in range(len(nns) - 3 - min(3, int(len(nns)/4))):
-        newnn = mutate(rng.choice(nns, p=prob), 0.1, rng.integers(low=0, high=1000))
+        newnn = mutate(rng.choice(nns, p=prob), 0.2, rng.integers(low=0, high=1000))
         nextgen.append(newnn)
     
     nnseeds = rng.integers(low=0, high=10000, size=min(3, int(len(nns)/4)))

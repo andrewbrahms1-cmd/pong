@@ -92,7 +92,7 @@ def frame_step(game):
         newballx = game["width"] - game["radius"] - 1
         if np.cos(game["ballangle"]) >= 0:
             game["ballangle"] = np.pi - game["ballangle"]
-    game["ballspeed"] = 5 * (10 + np.sqrt(game["num_hits"]))/10
+    game["ballspeed"] = 5 * (10 + game["num_hits"]**(2/3))/10
     game["ballx"] = newballx
     game["bally"] = newbally
 
