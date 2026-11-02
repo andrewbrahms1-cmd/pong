@@ -701,12 +701,15 @@ scrub.oninput = () => { pos = Number(scrub.value); setPlaying(false); };
 
 async function main() {
   const pyodide = await loadPyodide();
-  statusEl.textContent = "Loading numpy and scipy...";
-  await pyodide.loadPackage(["numpy", "scipy"]);
+  statusEl.textContent = "Loading Python packages...";
   for (const name of ["pong.py", "opponentNN.py"]) {
-    const src = await (await fetch(name, { cache: "no-store" })).text();
+    const response = await fetch(name, { cache: "no-store" });
+    if (!response.ok) throw new Error(`couldn't load ${name} (${response.status}) - it must be next to evolve.html`);
+    const src = await response.text();
     pyodide.FS.writeFile("/home/pyodide/" + name, src);
+    await pyodide.loadPackagesFromImports(src);   // only downloads what the files import (e.g. numpy)
   }
+  await pyodide.loadPackagesFromImports(GLUE);
   pyodide.runPython(GLUE);
   py = {};
   for (const name of ["reset", "step", "population_network", "top_network", "set_custom", "custom_game", "custom_sample",
