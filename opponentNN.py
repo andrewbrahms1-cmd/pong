@@ -96,10 +96,10 @@ def playgame(nn1, nn2, seed):
         currgame["opponentaction"] = nn2move
         pong.frame_step(currgame)
         if currgame["state"] == "won":
-            return (150*currgame["num_hits"], 50*currgame["num_hits"])
+            return (150*currgame["player_hits"], 50*currgame["opponent_hits"])
         if currgame["state"] == "lost":
-            return (50*currgame["num_hits"], 150*currgame["num_hits"])
-    return (90*currgame["num_hits"], 90*currgame["num_hits"])
+            return (50*currgame["player_hits"], 150*currgame["opponent_hits"])
+    return (90*currgame["player_hits"], 90*currgame["opponent_hits"])
 
 def playballtracker(nn, seed):
     rng = np.random.default_rng(seed)
@@ -183,7 +183,7 @@ def generation_increment(nns, lastscores, seed):
             scores[nn] += playballtracker(nns[nn], game_seed)
 
     for i in range(len(scores)):
-        scores[i] = scores[i] + lastscores[i]/2
+        scores[i] = scores[i] + lastscores[i]/6
 
     nextgen = []
     top3 = np.argpartition(scores, -3)[-3:]
@@ -194,7 +194,7 @@ def generation_increment(nns, lastscores, seed):
 
     ranks = (np.argsort(np.argsort(-scores)))
     keep = max(1, len(scores) // 4)
-    weights = np.maximum(0, keep - ranks)      # best gets `keep`, then keep-1, ..., 0 beyond the top 25%
+    weights = np.maximum(0, keep - ranks)  
     prob = weights / weights.sum()
     
 
@@ -218,12 +218,13 @@ if __name__ == "__main__":
     curr = generate(40, 0)
     rng = np.random.default_rng(12398)
     scores = np.zeros(40)
-    for _ in range(10000):
+    for gen in range(10000):
         curr, scores = generation_increment(curr, scores, rng.integers(low=0, high=10000, size=None))
 
-        if _ %10 == 0:
-            print(str(_) + " completed generations")
+        if gen %10 == 0:
+            print(str(gen) + " completed generations")
             print(curr[0])
-        if _%100 == 0:
+        if gen%100 == 0:
             with open("output.txt", "a", encoding="utf-8") as file:
+                file.write(str(gen) + " completed generations")
                 file.write(str(curr))

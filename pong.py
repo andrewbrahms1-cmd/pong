@@ -19,7 +19,9 @@ def new_game(width, height, seed):
         "state" : "ongoing",
         "playeraction" : None,
         "opponentaction" : None,
-        "num_hits" : 0
+        "num_hits" : 0,
+        "player_hits" : 0,
+        "opponent_hits" : 0
     }
 
 
@@ -73,6 +75,7 @@ def frame_step(game):
         newbally -= playerballintersect[3] - playerballintersect[1]
         offset = np.clip((newballx - game["playerpaddle"])/int(game["width"]/15), -1, 1)
         game["num_hits"] += 1
+        game["player_hits"] += 1
         game["ballangle"] = -(np.pi/2 + offset * np.pi/3)
     
     opponentballintersect = [max(opponentpaddle[0], newball[0]), max(opponentpaddle[1], newball[1]),
@@ -82,6 +85,7 @@ def frame_step(game):
         newbally += opponentballintersect[3] - opponentballintersect[1]
         offset = np.clip((newballx - game["opponentpaddle"])/int(game["width"]/15), -1, 1)
         game["num_hits"] += 1
+        game["opponent_hits"] += 1
         game["ballangle"] = np.pi/2 + offset * np.pi/3
 
     if newballx < game["radius"] + 1:

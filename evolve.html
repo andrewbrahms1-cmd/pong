@@ -54,6 +54,7 @@
     <label>Games <input id="matchGames" type="number" min="1" max="1000" value="20"></label>
     <label>Seed <input id="matchSeed" type="number" value="0"></label>
     <button id="runMatch" disabled>Play A vs B</button>
+    <button id="runTracker" disabled>Play A vs ball tracker</button>
   </div>
   <p id="matchResult">Games alternate sides so neither network always plays bottom. A sample game (A bottom, B top) is added to the list below for replay.</p>
 </div>
@@ -341,6 +342,27 @@ def custom_game(i):
 
 def custom_sample():
     return [_entry("custom", _playgame, (_custom["a"], _custom["b"], _custom["rng"].integers(low=0, high=10000)), {}, None)]
+
+# --- Pasted network A vs the ball tracker (uses opponentNN.playballtracker; A plays bottom) ---
+
+def set_custom_a(text_a, seed):
+    if _playtracker is None:
+        return "opponentNN has no playballtracker function."
+    try:
+        a = _parse_network(text_a, "A")
+    except ValueError as e:
+        return str(e)
+    _custom.update(a=a, rng=np.random.default_rng(seed))
+    return ""
+
+def custom_tracker_game():
+    start, start_returns = _frames_run, _bottom_returns
+    _playtracker(_custom["a"], _custom["rng"].integers(low=0, high=10000))
+    winner = "A" if _last_state == "won" else "tracker" if _last_state == "lost" else "draw"
+    return [winner, _frames_run - start, _bottom_returns - start_returns]
+
+def custom_tracker_sample():
+    return [_entry("custom_tracker", _playtracker, (_custom["a"], _custom["rng"].integers(low=0, high=10000)), {}, None)]
 `;
 
 let py = null;
@@ -367,7 +389,8 @@ const popName = i => (i == null ? "a network" : `population[${i}]`);
 // Read the winner from the final game state so this doesn't depend on the scoring.
 function outcome(entry) {
   const state = entry.frames[entry.frames.length - 1][6];
-  const [bottom, top] = entry.kind === "tracker" ? ["network", "tracker"] : ["bottom", "top"];
+  const [bottom, top] = entry.kind === "tracker" ? ["network", "tracker"]
+    : entry.kind === "custom_tracker" ? ["A", "tracker"] : ["bottom", "top"];
   if (state === "won") return `${bottom} wins`;
   if (state === "lost") return `${top} wins`;
   return "draw (frame limit)";
@@ -411,6 +434,8 @@ function show(index) {
     bottom = popName(match.players[0]);
     top = "ball tracker";
     note = ` (longest game against the ball tracker in generation ${match.gen}, played by the population before it)`;
+  } else if (match.kind === "custom_tracker") {
+    top = "ball tracker";
   }
   $("matchup").innerHTML = `<span style="color:#4af">${bottom} (bottom)</span> vs <span style="color:#f64">${top} (top)</span>${note}`;
   pos = 0;
@@ -511,7 +536,7 @@ function setPlaying(p) {
 
 function setBusy(b) {
   busy = b;
-  for (const id of ["newPop", "runGens", "runMatch", "fillA", "fillB", "genList", "playPause", "restart", "scrub"]) {
+  for (const id of ["newPop", "runGens", "runMatch", "runTracker", "fillA", "fillB", "genList", "playPause", "restart", "scrub"]) {
     $(id).disabled = b;
   }
   updateTopControls();
@@ -593,6 +618,52 @@ async function runCustomMatch() {
   show(history.length - 1);
 }
 
+// Network A vs the ball tracker: measures A's own returns, independent of any other network.
+async function runTrackerMatch() {
+  const n = Math.min(1000, Math.max(1, Number($("matchGames").value) | 0));
+  $("matchGames").value = n;
+  const error = py.set_custom_a($("nnA").value, Number($("matchSeed").value) | 0);
+  matchResultEl.classList.toggle("error", !!error);
+  if (error) {
+    matchResultEl.textContent = error;
+    return;
+  }
+  stopRequested = false;
+  setBusy(true);
+  $("stop").disabled = false;
+  const tally = { A: 0, tracker: 0, draw: 0 };
+  let totalFrames = 0, totalReturns = 0, bestReturns = 0, played = 0;
+  for (let i = 0; i < n && !stopRequested; i++) {
+    if (i % 5 === 0) {
+      statusEl.textContent = `Playing A vs ball tracker: game ${i + 1}/${n}...`;
+      await repaint();
+    }
+    const proxy = py.custom_tracker_game();
+    const [winner, frames, returns] = proxy.toJs();
+    proxy.destroy();
+    tally[winner]++;
+    totalFrames += frames;
+    totalReturns += returns;
+    bestReturns = Math.max(bestReturns, returns);
+    played++;
+  }
+  const pct = k => played ? ` (${(100 * tally[k] / played).toFixed(0)}%)` : "";
+  matchResultEl.textContent =
+    `${played} games vs ball tracker: A returned the ball ${played ? (totalReturns / played).toFixed(1) : 0} times per game ` +
+    `on average (best ${bestReturns})\n` +
+    `A won ${tally.A}${pct("A")}, tracker won ${tally.tracker}${pct("tracker")}, draws ${tally.draw}${pct("draw")} | ` +
+    `average game length ${played ? (totalFrames / played).toFixed(0) : 0} frames`;
+
+  statusEl.textContent = "Recording sample game...";
+  await repaint();
+  const [entry] = callPy(py.custom_tracker_sample);
+  entry.label = `Custom #${++customCount}: A vs tracker`;
+  addToHistory(entry);
+  $("stop").disabled = true;
+  setBusy(false);
+  show(history.length - 1);
+}
+
 // Show Python errors on the page instead of leaving it stuck in its busy state.
 function guarded(fn) {
   return async () => {
@@ -612,6 +683,7 @@ function guarded(fn) {
 $("newPop").onclick = guarded(newPopulation);
 $("runGens").onclick = guarded(runGenerations);
 $("runMatch").onclick = guarded(runCustomMatch);
+$("runTracker").onclick = guarded(runTrackerMatch);
 $("fillA").onclick = () => { $("nnA").value = py.population_network(0); };
 $("fillB").onclick = () => { $("nnB").value = py.population_network(1); };
 $("stop").onclick = () => {
@@ -637,7 +709,8 @@ async function main() {
   }
   pyodide.runPython(GLUE);
   py = {};
-  for (const name of ["reset", "step", "population_network", "top_network", "set_custom", "custom_game", "custom_sample"]) {
+  for (const name of ["reset", "step", "population_network", "top_network", "set_custom", "custom_game", "custom_sample",
+                      "set_custom_a", "custom_tracker_game", "custom_tracker_sample"]) {
     py[name] = pyodide.globals.get(name);
   }
 
