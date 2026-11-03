@@ -14,7 +14,11 @@ def ball_tracker(game):
     else:
         return np.array([0, 1, 0])
 
-
+def trackertoNN():
+    return {
+        "NN" : "tracker"
+    }
+    
 
 def new_network(numinputs, hiddenlayer1, hiddenlayer2, outputs, seed):
     rng = np.random.default_rng(seed)
@@ -113,17 +117,35 @@ def playballtracker(nn, seed):
         currgame["opponentaction"] = forwardpassmove
         pong.frame_step(currgame)
         if currgame["state"] == "won":
-            return 1200*currgame["num_hits"]
+            return (150*currgame["num_hits"], 50*currgame["num_hits"])
         if currgame["state"] == "lost":
-            return 600*currgame["num_hits"]
-    return 1000*currgame["num_hits"]
+            return (50*currgame["num_hits"], 150*currgame["num_hits"])
+    return (90*currgame["num_hits"], 90*currgame["num_hits"])
+
+def trackervtracker(seed):
+    rng = np.random.default_rng(seed)
+    currgame = pong.new_game(720, 1080, rng.integers(low=0, high=1000))
+    actions = ["left", None, "right"]
+
+    for _ in range(6000):
+        tracker1move = actions[np.argmax(ball_tracker(currgame))]
+        tracker2move = actions[np.argmax(ball_tracker(pong.flipsides(currgame)))]
+        currgame["playeraction"] = tracker1move
+        currgame["opponentaction"] = tracker2move
+        pong.frame_step(currgame)
+        if currgame["state"] == "won":
+            return (150*currgame["num_hits"], 50*currgame["num_hits"])
+        if currgame["state"] == "lost":
+            return (50*currgame["num_hits"], 150*currgame["num_hits"])
+    return (90*currgame["num_hits"], 90*currgame["num_hits"])
+
 
 def generate(num, seed):
     rng = np.random.default_rng(seed)
     nnseeds = rng.integers(low=0, high=10000, size=num)
     
     output = np.array([new_network(7, 7, 7, 3, nnseed) for nnseed in nnseeds])
-
+    
     return output
 
 def mutate(nn, rate, seed, scalefactor=0.3):
@@ -166,10 +188,66 @@ def mutate(nn, rate, seed, scalefactor=0.3):
         newnn["l3biases"][val] = min(newnn["l3biases"][val], 5) 
     return newnn
 
-def generation_increment(nns, lastscores, seed):
+def generation_increment(nns, seed, top5, recursionnum=5):
     rng = np.random.default_rng(seed)
-    seeds = rng.integers(low=0, high=10000, size=3)
+    seeds = rng.integers(low=0, high=10000, size=(len(nns)*5))
     scores = np.zeros(len(nns))
+    top5scores = np.zeros(5)
+    for nn in range(len(nns)):
+        for opp in range(5):
+            for newseed in range(recursionnum):
+                if top5[opp] == trackertoNN():
+                    score = playballtracker(nns[nn], seeds[nn*5+opp] + newseed)
+                    scores[nn] += score[0]
+                else:
+                    score = playgame(nns[nn], top5[opp], seeds[nn*5+opp] + newseed)
+                    scores[nn] += score[0]
+    moreseeds = rng.integers(low=0, high=10000, size=(5, 5, recursionnum))
+
+    for opp1 in range(5):
+        for opp2 in range(5):
+            for newseed in range(recursionnum):
+                if top5[opp1] == trackertoNN() and top5[opp2] == trackertoNN():
+                    score = trackervtracker(moreseeds[opp1][opp2][newseed])
+                    top5scores[opp1] += score[0]/2
+                    top5scores[opp2] += score[1]/2
+                elif top5[opp1] == trackertoNN() and top5[opp2] != trackertoNN():
+                    score = playballtracker(top5[opp2], moreseeds[opp1][opp2][newseed])
+                    top5scores[opp1] += score[1]/2
+                    top5scores[opp2] += score[0]/2
+                elif top5[opp2] == trackertoNN() and top5[opp1] != trackertoNN():
+                    score = playballtracker(top5[opp1], moreseeds[opp1][opp2][newseed])
+                    top5scores[opp1] += score[0]/2
+                    top5scores[opp2] += score[1]/2
+                else:
+                    score = playgame(top5[opp1], top5[opp2], moreseeds[opp1][opp2][newseed])
+                    top5scores[opp1] += score[0]/2
+                    top5scores[opp2] += score[1]/2
+
+
+
+    newtop5 = []
+    descindices = np.argsort(scores)[::-1]
+    desctop5indices = np.argsort(top5scores)[::-1]
+    origtop5index = 0
+    scoreindex = 0
+    while len(newtop5) < 5:
+        if top5scores[desctop5indices[origtop5index]] < scores[descindices[scoreindex]]:
+            newtop5.append(nns[descindices[scoreindex]])
+
+            scoreindex += 1
+        else:
+            newtop5.append(top5[desctop5indices[origtop5index]])
+            origtop5index += 1
+
+    childseeds = rng.integers(low=0, high=10000, size=len(nns))
+    nextgen = []
+    for _ in range(len(nns)):
+        parent = nns[rng.choice(descindices[:5], p=[.4, .25, .15, .1, .1])]
+        nextgen.append(mutate(parent, 0.2, childseeds[_]))
+
+    return (newtop5, nextgen)
+    """
     for game_seed in seeds:
         for nn1 in range(len(nns)):
             for nn2 in range(len(nns)):
@@ -184,7 +262,7 @@ def generation_increment(nns, lastscores, seed):
 
     for i in range(len(scores)):
         scores[i] = scores[i] + lastscores[i]/6
-
+        
     nextgen = []
     top3 = np.argpartition(scores, -3)[-3:]
     for k in top3:
@@ -212,15 +290,20 @@ def generation_increment(nns, lastscores, seed):
     nextscores = np.zeros(len(nns))
     nextscores[:3] = scores[top3]
     return (nextgen, nextscores)
+"""
+
+
+
+
 
 
 if __name__ == "__main__":
     curr = generate(40, 0)
+    top5 = np.array([trackertoNN(),trackertoNN(),trackertoNN(),trackertoNN(),trackertoNN()])
     rng = np.random.default_rng(12398)
     scores = np.zeros(40)
     for gen in range(10000):
-        curr, scores = generation_increment(curr, scores, rng.integers(low=0, high=10000, size=None))
-
+        top5, curr = generation_increment(curr, rng.integers(low=0, high=10000, size=None), top5)
         if gen %10 == 0:
             print(str(gen) + " completed generations")
             print(curr[0])

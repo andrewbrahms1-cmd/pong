@@ -26,12 +26,13 @@
 <body>
 <h1>NN Evolution</h1>
 <div class="controls">
-  <label>Population <input id="popSize" type="number" min="2" max="40" value="10"></label>
+  <label>Population <input id="popSize" type="number" min="5" max="40" value="10"></label>
   <label>Seed <input id="seed" type="number" value="0"></label>
   <button id="newPop" disabled>New population</button>
 </div>
 <div class="controls">
   <label>Generations <input id="genCount" type="number" min="1" max="1000" value="10"></label>
+  <label title="recursionnum: games played per pairing in generation_increment">Games per pairing <input id="gamesPerPair" type="number" min="1" max="50" value="5"></label>
   <button id="runGens" disabled>Run generation_increment</button>
   <button id="stop" disabled>Stop</button>
 </div>
@@ -94,7 +95,7 @@
 // Runs opponentNN.generation_increment() in the browser via Pyodide. After each
 // generation, the longest game of its tournament is replayed with recording on so it
 // can be watched below. Networks can also be pasted in and played against each other.
-// Serve this folder over HTTP (python serve.py) and open http://127.0.0.1:8000/evolve.html
+// Serve this folder over HTTP: run python serve.py in this folder (opens http://127.0.0.1:8000/index.html)
 const SCALE = 0.6;
 const STEP_MS = 1000 / 60;
 
@@ -211,38 +212,56 @@ def _entry(kind, fn, args, kwargs, players, expected_length=None):
 pop = None
 rng = None
 gen = 0
-scores = None   # scores returned by the last generation_increment, passed back in as lastscores
-_top = {}       # generation -> (network, score, index in the returned population)
+top5 = None     # hall of fame passed into and returned by generation_increment (best first)
+_top = {}       # generation -> (network, rank in that generation's top 5)
 
 def _index(population, nn):
     return next((k for k, n in enumerate(population) if n is nn), None)
+
+def _is_tracker(nn):
+    return "NN" in nn
+
+def _name(nn, population, hall):
+    # Label a network that played this generation: a population member or a top-5 member.
+    i = _index(population, nn)
+    if i is not None:
+        return f"population[{i}]"
+    j = _index(hall, nn)
+    if j is not None:
+        return f"top5[{j}]"
+    return "a network"
 
 def _arg(args, kwargs, pos, name):
     return args[pos] if len(args) > pos else kwargs.get(name)
 
 def reset(size, seed):
     # Gen 0 has no tournament yet, so show population[0] vs population[1].
-    global pop, rng, gen, scores
+    # The top 5 starts as five ball trackers, as in opponentNN's __main__.
+    global pop, rng, gen, top5
     rng = np.random.default_rng(seed)
     pop = opponentNN.generate(size, rng.integers(low=0, high=10000))
+    top5 = [opponentNN.trackertoNN() for _ in range(5)]
     gen = 0
-    scores = np.zeros(size)
     _top.clear()
-    return [_entry("sample", _playgame, (pop[0], pop[1], rng.integers(low=0, high=10000)), {}, [0, 1])]
+    return [_entry("sample", _playgame, (pop[0], pop[1], rng.integers(low=0, high=10000)), {},
+                   ["population[0]", "population[1]"])]
 
-def step():
+def step(games_per_pairing):
     # Runs one generation, then replays the longest network-vs-network game and the longest
     # game against the ball tracker with recording on.
-    global pop, gen, scores
+    global pop, gen, top5
     _reset_gen_stats()
-    played = pop
-    pop, scores = opponentNN.generation_increment(pop, scores, rng.integers(low=0, high=10000))
+    played, hall = pop, top5
+    top5, pop = opponentNN.generation_increment(pop, rng.integers(low=0, high=10000), top5, games_per_pairing)
     gen += 1
-    # Top performer = the network generation_increment scored highest (it returns the elites' scores).
-    best = int(np.argmax(scores))
-    _top[gen] = (pop[best], float(scores[best]), best)
+    # Top performer = the first network in the returned top 5 (it is sorted best first);
+    # there is none while the top 5 is still all ball trackers.
+    rank = next((k for k, n in enumerate(top5) if not _is_tracker(n)), None)
+    if rank is not None:
+        _top[gen] = (top5[rank], rank)
     s = dict(_stats)
     stats = {
+        "top5_networks": sum(not _is_tracker(n) for n in top5),
         "avg_match_frames": s["match_frames"] / s["matches"] if s["matches"] else None,
         "tracker_games": s["tracker_games"],
         "avg_tracker_frames": s["tracker_frames"] / s["tracker_games"] if s["tracker_games"] else None,
@@ -252,27 +271,28 @@ def step():
     entries = []
     if "nn" in _longest:
         length, args, kwargs = _longest["nn"]
-        players = [_index(played, _arg(args, kwargs, 0, "nn1")), _index(played, _arg(args, kwargs, 1, "nn2"))]
+        players = [_name(_arg(args, kwargs, 0, "nn1"), played, hall), _name(_arg(args, kwargs, 1, "nn2"), played, hall)]
         entries.append(_entry("nn", _playgame, args, kwargs, players, length))
     if "tracker" in _longest:
         length, args, kwargs = _longest["tracker"]
-        entries.append(_entry("tracker", _playtracker, args, kwargs, [_index(played, _arg(args, kwargs, 0, "nn"))], length))
+        entries.append(_entry("tracker", _playtracker, args, kwargs, [_name(_arg(args, kwargs, 0, "nn"), played, hall)], length))
     for e in entries:
         e["stats"] = stats
+        e["has_top"] = gen in _top
     return entries
 
 def population_network(i):
     return str(pop[i])
 
 def top_network(g):
-    # [text, score, index] for generation g's top performer, or None. Printed at full
+    # [text, rank in top 5] for generation g's top performer, or None. Printed at full
     # precision in the same format opponentNN prints, so it can be pasted back in exactly.
     if g not in _top:
         return None
-    nn, score, idx = _top[g]
+    nn, rank = _top[g]
     with np.printoptions(precision=17, floatmode="unique", threshold=sys.maxsize):
         text = str(nn)
-    return [text, score, idx]
+    return [text, rank]
 
 # --- Pasted networks ---
 
@@ -384,7 +404,6 @@ function callPy(fn, ...args) {
 }
 
 const fmt = (x, digits = 0) => (x == null ? "n/a" : x.toFixed(digits));
-const popName = i => (i == null ? "a network" : `population[${i}]`);
 
 // Read the winner from the final game state so this doesn't depend on the scoring.
 function outcome(entry) {
@@ -411,6 +430,7 @@ function addToHistory(entry) {
   const s = entry.stats;
   if (entry.kind === "sample") text += " (initial population sample)";
   if (entry.kind === "nn") text += ` | tournament avg ${fmt(s.avg_match_frames)} frames/match`;
+  if (s) text += ` | top 5: ${s.top5_networks} networks, ${5 - s.top5_networks} trackers`;
   if (entry.kind === "tracker") {
     text += ` (${entry.bottom_returns} returns) | vs tracker: avg ${fmt(s.avg_tracker_returns, 1)} returns/game,` +
             ` best ${s.best_tracker_returns}, avg ${fmt(s.avg_tracker_frames)} frames`;
@@ -428,12 +448,12 @@ function show(index) {
   scrub.max = match.frames.length - 1;
   let bottom = "Network A", top = "Network B", note = "";
   if (match.kind === "sample" || match.kind === "nn") {
-    [bottom, top] = match.players.map(popName);
-    if (match.kind === "nn") note = ` (longest network game of generation ${match.gen}'s tournament, played by the population before it)`;
+    [bottom, top] = match.players;
+    if (match.kind === "nn") note = ` (longest network game of generation ${match.gen}, population and top 5 before it)`;
   } else if (match.kind === "tracker") {
-    bottom = popName(match.players[0]);
+    bottom = match.players[0];
     top = "ball tracker";
-    note = ` (longest game against the ball tracker in generation ${match.gen}, played by the population before it)`;
+    note = ` (longest game against the ball tracker in generation ${match.gen}, population and top 5 before it)`;
   } else if (match.kind === "custom_tracker") {
     top = "ball tracker";
   }
@@ -447,23 +467,23 @@ function show(index) {
 
 // Generation whose top performer the export buttons act on (the one being viewed), or null.
 function topGen() {
-  return match && match.label == null && match.gen > 0 ? match.gen : null;
+  return match && match.label == null && match.gen > 0 && match.has_top ? match.gen : null;
 }
 
 function updateTopControls() {
   const g = topGen();
   for (const id of ["topDownload", "topCopy", "topToA", "topToB"]) $(id).disabled = busy || g == null;
-  $("topInfo").textContent = g == null
-    ? "Top performer: select a generation (1 or later) to export its best network"
-    : `Top performer of Gen ${g}:`;
+  $("topInfo").textContent = g != null ? `Top performer of Gen ${g}:`
+    : match && match.label == null && match.gen > 0 ? `Gen ${match.gen}: top 5 is all ball trackers, no network to export yet`
+    : "Top performer: select a generation (1 or later) to export its best network";
 }
 
 function fetchTop() {
   const proxy = py.top_network(topGen());
   if (proxy == null) return null;
-  const [text, score, index] = proxy.toJs();
+  const [text, rank] = proxy.toJs();
   proxy.destroy();
-  return { text, score, index, gen: topGen() };
+  return { text, rank, gen: topGen() };
 }
 
 function downloadText(text, filename) {
@@ -475,8 +495,7 @@ function downloadText(text, filename) {
 }
 
 function topDone(top, what) {
-  $("topInfo").textContent = `Top performer of Gen ${top.gen} (population[${top.index}] after that generation, ` +
-    `score ${top.score.toFixed(0)}): ${what}`;
+  $("topInfo").textContent = `Top performer of Gen ${top.gen} (top5[${top.rank}] after that generation): ${what}`;
 }
 
 $("topDownload").onclick = () => {
@@ -551,7 +570,7 @@ async function newPopulation() {
   history = [];
   customCount = 0;
   genList.innerHTML = "";
-  const size = Math.max(2, Number($("popSize").value) | 0);
+  const size = Math.max(5, Number($("popSize").value) | 0);   // generation_increment picks parents from the best 5
   callPy(py.reset, size, Number($("seed").value) | 0).forEach(addToHistory);
   setBusy(false);
   show(0);
@@ -562,6 +581,8 @@ let stopRequested = false;
 async function runGenerations() {
   const count = Math.min(1000, Math.max(1, Number($("genCount").value) | 0));
   $("genCount").value = count;
+  const gamesPerPair = Math.min(50, Math.max(1, Number($("gamesPerPair").value) | 0));
+  $("gamesPerPair").value = gamesPerPair;
   stopRequested = false;
   setBusy(true);
   $("stop").disabled = false;
@@ -569,7 +590,7 @@ async function runGenerations() {
     const nextGen = Math.max(0, ...history.filter(e => e.label == null).map(e => e.gen)) + 1;
     statusEl.textContent = `Running generation ${nextGen} (${i}/${count})...`;
     await repaint();
-    callPy(py.step).forEach(addToHistory);
+    callPy(py.step, gamesPerPair).forEach(addToHistory);
   }
   $("stop").disabled = true;
   setBusy(false);
@@ -704,7 +725,7 @@ async function main() {
   statusEl.textContent = "Loading Python packages...";
   for (const name of ["pong.py", "opponentNN.py"]) {
     const response = await fetch(name, { cache: "no-store" });
-    if (!response.ok) throw new Error(`couldn't load ${name} (${response.status}) - it must be next to evolve.html`);
+    if (!response.ok) throw new Error(`couldn't load ${name} (${response.status}) - it must be next to index.html`);
     const src = await response.text();
     pyodide.FS.writeFile("/home/pyodide/" + name, src);
     await pyodide.loadPackagesFromImports(src);   // only downloads what the files import (e.g. numpy)
