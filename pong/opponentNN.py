@@ -3,6 +3,7 @@ import numpy as np
 
 import copy
 
+
 def relu(x):
     return np.maximum(0, x)
 
@@ -93,7 +94,7 @@ def playgame(nn1, nn2, seed):
     currgame = pong.new_game(720, 1080, rng.integers(low=0, high=1000))
     actions = ["left", None, "right"]
 
-    for _ in range(6000):
+    for _ in range(30000):
         nn1move = actions[np.argmax(forward_pass(currgame, nn1))]
         nn2move = actions[np.argmax(forward_pass(pong.flipsides(currgame), nn2))]
         currgame["playeraction"] = nn1move
@@ -110,7 +111,7 @@ def playballtracker(nn, seed):
     currgame = pong.new_game(720, 1080, rng.integers(low=0, high=1000))
     actions = ["left", None, "right"]
 
-    for _ in range(6000):
+    for _ in range(30000):
         nnmove = actions[np.argmax(forward_pass(currgame, nn))]
         forwardpassmove = actions[np.argmax(ball_tracker(pong.flipsides(currgame)))]
         currgame["playeraction"] = nnmove
@@ -127,7 +128,7 @@ def trackervtracker(seed):
     currgame = pong.new_game(720, 1080, rng.integers(low=0, high=1000))
     actions = ["left", None, "right"]
 
-    for _ in range(6000):
+    for _ in range(30000):
         tracker1move = actions[np.argmax(ball_tracker(currgame))]
         tracker2move = actions[np.argmax(ball_tracker(pong.flipsides(currgame)))]
         currgame["playeraction"] = tracker1move
@@ -137,7 +138,7 @@ def trackervtracker(seed):
             return (150*currgame["num_hits"], 50*currgame["num_hits"])
         if currgame["state"] == "lost":
             return (50*currgame["num_hits"], 150*currgame["num_hits"])
-    return (90*currgame["num_hits"], 90*currgame["num_hits"])
+    return (75*currgame["num_hits"], 75*currgame["num_hits"])
 
 
 def generate(num, seed):
@@ -209,16 +210,16 @@ def generation_increment(nns, seed, top5, recursionnum=5):
             for newseed in range(recursionnum):
                 if top5[opp1] == trackertoNN() and top5[opp2] == trackertoNN():
                     score = trackervtracker(moreseeds[opp1][opp2][newseed])
-                    top5scores[opp1] += score[0]/2
-                    top5scores[opp2] += score[1]/2
+                    top5scores[opp1] += int(score[0]/2.1)
+                    top5scores[opp2] += int(score[1]/2.1)
                 elif top5[opp1] == trackertoNN() and top5[opp2] != trackertoNN():
                     score = playballtracker(top5[opp2], moreseeds[opp1][opp2][newseed])
-                    top5scores[opp1] += score[1]/2
+                    top5scores[opp1] += int(score[1]/2.1)
                     top5scores[opp2] += score[0]/2
                 elif top5[opp2] == trackertoNN() and top5[opp1] != trackertoNN():
                     score = playballtracker(top5[opp1], moreseeds[opp1][opp2][newseed])
                     top5scores[opp1] += score[0]/2
-                    top5scores[opp2] += score[1]/2
+                    top5scores[opp2] += int(score[1]/2.1)
                 else:
                     score = playgame(top5[opp1], top5[opp2], moreseeds[opp1][opp2][newseed])
                     top5scores[opp1] += score[0]/2
